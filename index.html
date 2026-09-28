@@ -191,26 +191,49 @@
     if (KEYMAP[e.code] || e.code === 'Space') e.preventDefault();
     initAudio();
     if (e.code === 'KeyM') { toggleMute(); return; }
-    if (e.code === 'KeyP' || e.code === 'Escape') { if (state !== 'attract' && state !== 'over') paused = !paused; return; }
+    if (e.code === 'KeyP' || e.code === 'Escape') { if (paused) resumeGame(); else pauseGame(); return; }
     if ((e.code === 'Space' || e.code === 'Enter') && (state === 'attract' || state === 'over')) { startOrContinue(); return; }
     if (KEYMAP[e.code]) keys[KEYMAP[e.code]] = true;
   });
   window.addEventListener('keyup', e => { if (KEYMAP[e.code]) keys[KEYMAP[e.code]] = false; });
-  window.addEventListener('blur', () => { for (const k in keys) keys[k] = false; });
-  document.addEventListener('visibilitychange', () => {
-    if (document.hidden && (state === 'play')) paused = true;
-  });
+
+  // Pause whenever the page loses focus: app switch, lock screen, notification shade, tab change.
+  const inRound = () => state === 'play' || state === 'landed' || state === 'crashed';
+  function releaseControls() {
+    for (const k in keys) keys[k] = false;
+    for (const k in touchKeys) touchKeys[k] = false;
+    document.querySelectorAll('.touch button.on').forEach(b => b.classList.remove('on'));
+  }
+  function pauseGame() {
+    if (inRound()) paused = true;
+    releaseControls();
+    silenceEngine();
+  }
+  function resumeGame() {
+    paused = false;
+    initAudio();
+  }
+  function lostFocus() {
+    pauseGame();
+    if (AC && AC.state === 'running') AC.suspend().catch(() => {});
+  }
+  window.addEventListener('blur', lostFocus);
+  window.addEventListener('pagehide', lostFocus);
+  document.addEventListener('visibilitychange', () => { if (document.hidden) lostFocus(); });
+
   cv.addEventListener('pointerdown', e => {
     if (state === 'attract' || state === 'over') startOrContinue();
-    else if (paused) { paused = false; initAudio(); }
+    else if (paused) resumeGame();
   });
+  // iOS only unlocks audio on touchend/click, not on touchstart/pointerdown, so retry there too.
+  ['pointerup', 'touchend', 'click'].forEach(t => window.addEventListener(t, () => initAudio(), { passive: true }));
 
   const touchEl = document.getElementById('touch');
   const coarse = window.matchMedia && window.matchMedia('(pointer: coarse)').matches;
   if (coarse || 'ontouchstart' in window) touchEl.hidden = false;
   touchEl.querySelectorAll('button').forEach(b => {
     const k = b.dataset.k;
-    const on = e => { e.preventDefault(); b.setPointerCapture && b.setPointerCapture(e.pointerId); touchKeys[k] = true; b.classList.add('on'); startOrContinue(); if (paused) paused = false; };
+    const on = e => { e.preventDefault(); b.setPointerCapture && b.setPointerCapture(e.pointerId); touchKeys[k] = true; b.classList.add('on'); startOrContinue(); if (paused) resumeGame(); };
     const off = e => { touchKeys[k] = false; b.classList.remove('on'); };
     b.addEventListener('pointerdown', on);
     b.addEventListener('pointerup', off);
@@ -222,9 +245,19 @@
   // ---------- Audio ----------
   let AC = null, master, thrustGain, thrustFilter, noiseBuf, muted = false;
   function initAudio() {
-    if (AC) { if (AC.state === 'suspended') AC.resume(); return; }
+    if (document.hidden) return;
+    if (AC) {
+      // 'suspended' after autoplay blocking or our own suspend; 'interrupted' after an iOS app switch or call.
+      if (AC.state !== 'running') AC.resume().then(unlockPing).catch(() => {});
+      return;
+    }
     try {
+      // Let sound play on iPhones with the ring/silent switch on silent (iOS 17+).
+      try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch (e) {}
       AC = new (window.AudioContext || window.webkitAudioContext)();
+      AC.addEventListener && AC.addEventListener('statechange', () => { if (AC.state === 'running') silenceEngine(); });
+      if (AC.state !== 'running') AC.resume().catch(() => {});
+      unlockPing();
       master = AC.createGain(); master.gain.value = 0.6; master.connect(AC.destination);
       noiseBuf = AC.createBuffer(1, AC.sampleRate * 2, AC.sampleRate);
       const d = noiseBuf.getChannelData(0);
@@ -235,6 +268,20 @@
       src.connect(thrustFilter).connect(thrustGain).connect(master);
       src.start();
     } catch (e) { AC = null; }
+  }
+  // A silent one-sample buffer played inside the gesture fully unlocks older iOS WebKit.
+  function unlockPing() {
+    if (!AC) return;
+    try {
+      const s = AC.createBufferSource();
+      s.buffer = AC.createBuffer(1, 1, 22050);
+      s.connect(AC.destination); s.start(0);
+    } catch (e) {}
+  }
+  function silenceEngine() {
+    if (!thrustGain) return;
+    thrustGain.gain.cancelScheduledValues(AC.currentTime);
+    thrustGain.gain.setValueAtTime(0, AC.currentTime);
   }
   function toggleMute() {
     muted = !muted;
@@ -556,7 +603,7 @@
     }
     if (paused) {
       text('PAUSED', W / 2, H * 0.36, big, 'center', 6);
-      text(coarse ? 'TAP TO RESUME' : 'PRESS P TO RESUME', W / 2, H * 0.36 + big * 1.5, Math.round(big * 0.55), 'center', 2);
+      text(coarse ? 'TAP TO RESUME' : 'PRESS P OR CLICK TO RESUME', W / 2, H * 0.36 + big * 1.5, Math.round(big * 0.55), 'center', 2);
     }
     if (muted) text('SOUND OFF', 16, H - 16, 12, 'left', 1);
   }
