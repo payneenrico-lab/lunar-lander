@@ -1,0 +1,602 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Lunar Lander</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap" rel="stylesheet">
+<style>
+  :root { color-scheme: dark; --bg: #000; --ink: #e6f1ff; --glow: rgba(150, 200, 255, 0.55); }
+  [hidden] { display: none !important; }
+  html, body { height: 100%; margin: 0; background: var(--bg); overflow: hidden; }
+  body {
+    touch-action: none; user-select: none; -webkit-user-select: none;
+    font-family: 'Share Tech Mono', ui-monospace, Consolas, monospace; color: var(--ink);
+  }
+  #game { position: fixed; inset: 0; width: 100%; height: 100%; display: block; cursor: crosshair; }
+  .touch {
+    position: fixed; left: 0; right: 0; bottom: 0;
+    display: flex; justify-content: space-between; align-items: flex-end;
+    padding: 0 16px calc(16px + env(safe-area-inset-bottom, 0px));
+    pointer-events: none;
+  }
+  .touch .grp { display: flex; gap: 12px; align-items: flex-end; pointer-events: auto; }
+  .touch button {
+    width: 64px; height: 64px; border-radius: 50%;
+    background: rgba(0, 0, 0, 0.35); color: var(--ink);
+    border: 1.5px solid var(--ink); box-shadow: 0 0 8px var(--glow), inset 0 0 8px var(--glow);
+    font: 20px 'Share Tech Mono', ui-monospace, monospace; letter-spacing: 0.05em;
+    -webkit-tap-highlight-color: transparent; touch-action: none;
+  }
+  .touch button.big { width: 88px; height: 88px; font-size: 14px; }
+  .touch button.sm { width: 56px; height: 56px; font-size: 11px; }
+  .touch button.on { background: rgba(230, 241, 255, 0.18); }
+  .touch button:focus-visible { outline: 2px solid var(--ink); outline-offset: 3px; }
+</style>
+</head>
+<body>
+
+<canvas id="game" aria-label="Lunar Lander game screen"></canvas>
+<div class="touch" id="touch" hidden>
+  <div class="grp">
+    <button type="button" id="btn-left" data-k="left" aria-label="Rotate left">&#9664;</button>
+    <button type="button" id="btn-right" data-k="right" aria-label="Rotate right">&#9654;</button>
+  </div>
+  <div class="grp">
+    <button type="button" id="btn-abort" class="sm" data-k="abort">ABORT</button>
+    <button type="button" id="btn-thrust" class="big" data-k="thrust">THRUST</button>
+  </div>
+</div>
+
+<script>
+(() => {
+  'use strict';
+  const cv = document.getElementById('game');
+  const ctx = cv.getContext('2d');
+  const FONT = "'Share Tech Mono', ui-monospace, Consolas, monospace";
+  const INK = '#e6f1ff', GLOW = 'rgba(150,200,255,0.85)';
+
+  // ---------- Sizing ----------
+  let W = 0, H = 0, DPR = 1, safeTop = 0;
+  function resize() {
+    DPR = Math.min(window.devicePixelRatio || 1, 2);
+    W = window.innerWidth; H = window.innerHeight;
+    cv.width = Math.round(W * DPR); cv.height = Math.round(H * DPR);
+    safeTop = parseFloat(getComputedStyle(document.documentElement).paddingTop) || 0;
+  }
+  window.addEventListener('resize', resize);
+  resize();
+  const baseScale = () => Math.min(H / 820, W / 700);
+
+  // ---------- World constants ----------
+  const WORLD = 3000, SEG = 160, STEP = WORLD / SEG;
+  const G = 9, THRUST = 24, FUEL_RATE = 28, ROT = Math.PI * 0.8;
+  const START_FUEL = 1000, LOW_FUEL = 150;
+  const PAD_SEGS = { 2: 5, 3: 4, 4: 3, 5: 2 };
+
+  // ---------- Terrain ----------
+  let ground = [], pads = [];
+  const mod = (n, m) => ((n % m) + m) % m;
+  const gy = i => ground[mod(i, SEG)];
+  function heightAt(x) {
+    const f = x / STEP, i = Math.floor(f), t = f - i;
+    return gy(i) * (1 - t) + gy(i + 1) * t;
+  }
+  function genTerrain() {
+    const oct = [[1, 90], [2, 70], [3, 55], [5, 40], [8, 26], [13, 16], [21, 9]]
+      .map(([f, a]) => [f, a * (0.7 + Math.random() * 0.6), Math.random() * Math.PI * 2]);
+    ground = new Array(SEG);
+    for (let i = 0; i < SEG; i++) {
+      const u = i / SEG;
+      let y = 560;
+      for (const [f, a, p] of oct) y += a * Math.sin(2 * Math.PI * f * u + p);
+      y += (Math.random() - 0.5) * 16;
+      ground[i] = Math.max(330, Math.min(790, y));
+    }
+    pads = [];
+    const used = new Array(SEG).fill(false);
+    for (const m of [2, 5, 3, 2, 4, 3, 5]) {
+      const k = PAD_SEGS[m];
+      for (let tries = 0; tries < 300; tries++) {
+        const i = Math.floor(Math.random() * SEG);
+        let ok = true;
+        for (let j = i - 7; j <= i + k + 7; j++) if (used[mod(j, SEG)]) { ok = false; break; }
+        if (!ok) continue;
+        let y = 0;
+        for (let j = 0; j <= k; j++) y += ground[mod(i + j, SEG)];
+        y = Math.round(y / (k + 1));
+        for (let j = 0; j <= k; j++) { ground[mod(i + j, SEG)] = y; used[mod(i + j, SEG)] = true; }
+        pads.push({ x1: i * STEP, x2: (i + k) * STEP, y, m });
+        break;
+      }
+    }
+  }
+  function padUnder(xa, xb) {
+    const d = xb - xa, xn = mod(xa, WORLD);
+    for (const p of pads) {
+      for (const x of [xn, xn + WORLD]) if (x >= p.x1 - 0.5 && x + d <= p.x2 + 0.5) return p;
+    }
+    return null;
+  }
+
+  // ---------- Lander ----------
+  const SHAPE = [
+    [[-3, -12], [3, -12], [6, -9], [6, -5], [3, -2], [-3, -2], [-6, -5], [-6, -9], [-3, -12]],
+    [[-7, -2], [7, -2], [7, 3], [-7, 3], [-7, -2]],
+    [[-5, 3], [-11, 9]], [[5, 3], [11, 9]],
+    [[-13, 9], [-9, 9]], [[9, 9], [13, 9]],
+    [[-3, 3], [-4, 6], [4, 6], [3, 3]],
+  ];
+  const FEET = [[-11, 9], [11, 9]];
+  const HULL = [[-6, -9], [6, -9], [0, -12], [-7, 3], [7, 3], [0, 3], [-8, 6], [8, 6], [-6, -5], [6, -5]];
+  const L = { x: 0, y: 0, vx: 0, vy: 0, a: 0, thr: 0 };
+  function toWorld(lx, ly) {
+    const c = Math.cos(L.a), s = Math.sin(L.a);
+    return [L.x + lx * c - ly * s, L.y + lx * s + ly * c];
+  }
+
+  // ---------- Game state ----------
+  let state = 'attract';   // attract | play | landed | crashed | over
+  let paused = false;
+  let score = 0, fuel = START_FUEL, time = 0, stateT = 0;
+  let msg = '', sub = '', hi = 0;
+  let zoomed = false;
+  const cam = { x: 0, y: 0, z: 1 };
+  let debris = [], sparks = [];
+  try { hi = parseInt(localStorage.getItem('lunar-lander-hi') || '0', 10) || 0; } catch (e) {}
+
+  function visibleTop() { return 800 - (H - 12) / baseScale(); }
+
+  function spawn() {
+    const s0 = baseScale();
+    const halfW = W / 2 / s0;
+    const dir = Math.random() < 0.5 ? 1 : -1;
+    L.x = cam.x - dir * halfW * 0.7;
+    L.y = Math.max(visibleTop() + 70 + safeTop / s0, -40);
+    L.vx = dir * (16 + Math.random() * 14);
+    L.vy = 0; L.a = 0; L.thr = 0;
+    zoomed = false;
+    state = 'play'; stateT = 0;
+    msg = ''; sub = '';
+  }
+  function newGame() {
+    genTerrain();
+    score = 0; fuel = START_FUEL; time = 0;
+    debris = []; sparks = [];
+    cam.x = WORLD / 2; cam.z = 1;
+    spawn();
+  }
+  function endRound() {
+    if (fuel <= 0) {
+      state = 'over'; stateT = 0;
+      if (score > hi) { hi = score; try { localStorage.setItem('lunar-lander-hi', String(hi)); } catch (e) {} }
+    } else spawn();
+  }
+
+  // ---------- Input ----------
+  const keys = {};
+  const touchKeys = {};
+  const KEYMAP = {
+    ArrowLeft: 'left', KeyA: 'left', ArrowRight: 'right', KeyD: 'right',
+    ArrowUp: 'thrust', KeyW: 'thrust', Space: 'thrust', KeyX: 'abort',
+  };
+  const held = k => !!(keys[k] || touchKeys[k]);
+  function startOrContinue() {
+    initAudio();
+    if (state === 'attract' || (state === 'over' && stateT > 1.2)) newGame();
+  }
+  window.addEventListener('keydown', e => {
+    if (KEYMAP[e.code] || e.code === 'Space') e.preventDefault();
+    initAudio();
+    if (e.code === 'KeyM') { toggleMute(); return; }
+    if (e.code === 'KeyP' || e.code === 'Escape') { if (state !== 'attract' && state !== 'over') paused = !paused; return; }
+    if ((e.code === 'Space' || e.code === 'Enter') && (state === 'attract' || state === 'over')) { startOrContinue(); return; }
+    if (KEYMAP[e.code]) keys[KEYMAP[e.code]] = true;
+  });
+  window.addEventListener('keyup', e => { if (KEYMAP[e.code]) keys[KEYMAP[e.code]] = false; });
+  window.addEventListener('blur', () => { for (const k in keys) keys[k] = false; });
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden && (state === 'play')) paused = true;
+  });
+  cv.addEventListener('pointerdown', e => {
+    if (state === 'attract' || state === 'over') startOrContinue();
+    else if (paused) { paused = false; initAudio(); }
+  });
+
+  const touchEl = document.getElementById('touch');
+  const coarse = window.matchMedia && window.matchMedia('(pointer: coarse)').matches;
+  if (coarse || 'ontouchstart' in window) touchEl.hidden = false;
+  touchEl.querySelectorAll('button').forEach(b => {
+    const k = b.dataset.k;
+    const on = e => { e.preventDefault(); b.setPointerCapture && b.setPointerCapture(e.pointerId); touchKeys[k] = true; b.classList.add('on'); startOrContinue(); if (paused) paused = false; };
+    const off = e => { touchKeys[k] = false; b.classList.remove('on'); };
+    b.addEventListener('pointerdown', on);
+    b.addEventListener('pointerup', off);
+    b.addEventListener('pointercancel', off);
+    b.addEventListener('lostpointercapture', off);
+    b.addEventListener('contextmenu', e => e.preventDefault());
+  });
+
+  // ---------- Audio ----------
+  let AC = null, master, thrustGain, thrustFilter, noiseBuf, muted = false;
+  function initAudio() {
+    if (AC) { if (AC.state === 'suspended') AC.resume(); return; }
+    try {
+      AC = new (window.AudioContext || window.webkitAudioContext)();
+      master = AC.createGain(); master.gain.value = 0.6; master.connect(AC.destination);
+      noiseBuf = AC.createBuffer(1, AC.sampleRate * 2, AC.sampleRate);
+      const d = noiseBuf.getChannelData(0);
+      for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+      const src = AC.createBufferSource(); src.buffer = noiseBuf; src.loop = true;
+      thrustFilter = AC.createBiquadFilter(); thrustFilter.type = 'lowpass'; thrustFilter.frequency.value = 400;
+      thrustGain = AC.createGain(); thrustGain.gain.value = 0;
+      src.connect(thrustFilter).connect(thrustGain).connect(master);
+      src.start();
+    } catch (e) { AC = null; }
+  }
+  function toggleMute() {
+    muted = !muted;
+    if (AC) master.gain.setTargetAtTime(muted ? 0 : 0.6, AC.currentTime, 0.02);
+  }
+  function thrustSound(t) {
+    if (!AC) return;
+    const on = !paused && state === 'play';
+    thrustGain.gain.setTargetAtTime(on ? t * 0.55 : 0, AC.currentTime, 0.03);
+    thrustFilter.frequency.setTargetAtTime(250 + t * 650, AC.currentTime, 0.05);
+  }
+  function beep(freq, dur, when = 0, type = 'square', vol = 0.12) {
+    if (!AC) return;
+    const t0 = AC.currentTime + when;
+    const o = AC.createOscillator(), g = AC.createGain();
+    o.type = type; o.frequency.value = freq;
+    g.gain.setValueAtTime(vol, t0);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+    o.connect(g).connect(master); o.start(t0); o.stop(t0 + dur + 0.02);
+  }
+  function boom() {
+    if (!AC) return;
+    const t0 = AC.currentTime;
+    const src = AC.createBufferSource(); src.buffer = noiseBuf;
+    const lp = AC.createBiquadFilter(); lp.type = 'lowpass';
+    lp.frequency.setValueAtTime(1600, t0); lp.frequency.exponentialRampToValueAtTime(60, t0 + 1.8);
+    const g = AC.createGain();
+    g.gain.setValueAtTime(1.0, t0); g.gain.exponentialRampToValueAtTime(0.001, t0 + 2.2);
+    src.connect(lp).connect(g).connect(master); src.start(t0); src.stop(t0 + 2.3);
+    const o = AC.createOscillator(), og = AC.createGain();
+    o.type = 'sine'; o.frequency.setValueAtTime(90, t0); o.frequency.exponentialRampToValueAtTime(28, t0 + 0.8);
+    og.gain.setValueAtTime(0.9, t0); og.gain.exponentialRampToValueAtTime(0.001, t0 + 0.9);
+    o.connect(og).connect(master); o.start(t0); o.stop(t0 + 1);
+  }
+  function landChime(level) {
+    const notes = level === 2 ? [523, 659, 784, 1047] : level === 1 ? [523, 659, 784] : [392, 330];
+    notes.forEach((f, i) => beep(f, 0.18, i * 0.13, 'square', 0.1));
+  }
+
+  // ---------- Physics ----------
+  let lowBeepT = 0;
+  function step(dt) {
+    if (state === 'play') {
+      time += dt;
+      const abort = held('abort');
+      let target = 0;
+      if (abort) {
+        target = 1;
+        const turn = Math.min(Math.abs(L.a), ROT * dt);
+        L.a -= Math.sign(L.a) * turn;
+      } else {
+        if (held('left')) L.a -= ROT * dt;
+        if (held('right')) L.a += ROT * dt;
+        if (held('thrust')) target = 1;
+      }
+      L.a = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, L.a));
+      if (fuel <= 0) target = 0;
+      const rate = target > L.thr ? 4 : 7;
+      L.thr += Math.max(-rate * dt, Math.min(rate * dt, target - L.thr));
+      fuel = Math.max(0, fuel - L.thr * FUEL_RATE * dt);
+
+      const ax = L.thr * THRUST * Math.sin(L.a);
+      const ay = G - L.thr * THRUST * Math.cos(L.a);
+      L.vx += ax * dt; L.vy += ay * dt;
+      L.x += L.vx * dt; L.y += L.vy * dt;
+      checkContact();
+    } else {
+      L.thr = 0;
+    }
+
+    for (const d of debris) {
+      d.vy += G * dt; d.x += d.vx * dt; d.y += d.vy * dt; d.r += d.vr * dt;
+      const gh = heightAt(d.x);
+      if (d.y > gh) { d.y = gh; d.vy *= -0.3; d.vx *= 0.6; d.vr *= 0.5; }
+    }
+    for (const p of sparks) {
+      p.vy += G * dt; p.x += p.vx * dt; p.y += p.vy * dt; p.life -= dt;
+      if (p.y > heightAt(p.x)) { p.y = heightAt(p.x); p.vy *= -0.4; p.vx *= 0.7; }
+    }
+    sparks = sparks.filter(p => p.life > 0);
+  }
+
+  function altitude() {
+    return Math.max(0, heightAt(L.x) - (L.y + 9 * Math.cos(L.a)));
+  }
+
+  function checkContact() {
+    for (const [lx, ly] of HULL) {
+      const [wx, wy] = toWorld(lx, ly);
+      if (wy >= heightAt(wx)) { crash(); return; }
+    }
+    const f = FEET.map(([lx, ly]) => toWorld(lx, ly));
+    if (!f.some(([wx, wy]) => wy >= heightAt(wx))) return;
+
+    const pad = padUnder(Math.min(f[0][0], f[1][0]), Math.max(f[0][0], f[1][0]));
+    const vy = L.vy, vx = Math.abs(L.vx), ang = Math.abs(L.a) * 180 / Math.PI;
+    if (!pad || vy > 20 || vx > 12 || ang > 14) { crash(); return; }
+
+    let level, pts;
+    if (vy < 6 && vx < 3 && ang < 4) { level = 2; pts = 100 * pad.m; msg = 'PERFECT LANDING'; }
+    else if (vy < 12 && vx < 8 && ang < 8) { level = 1; pts = 50 * pad.m; msg = 'GOOD LANDING'; }
+    else { level = 0; pts = 15 * pad.m; msg = 'HARD LANDING. LANDER DAMAGED'; }
+    score += pts;
+    sub = `${pts} POINTS` + (level === 2 ? '   +50 FUEL UNITS' : '');
+    if (level === 2) fuel += 50;
+    L.y = pad.y - 9; L.a = 0; L.vx = 0; L.vy = 0; L.thr = 0;
+    state = 'landed'; stateT = 0;
+    landChime(level);
+  }
+
+  function crash() {
+    const speed = Math.hypot(L.vx, L.vy);
+    msg = 'LANDER DESTROYED';
+    const depth = Math.max(1, Math.round(speed / 4));
+    sub = fuel <= 0 ? 'OUT OF FUEL' : `NEW CRATER ${depth} METER${depth === 1 ? '' : 'S'} DEEP`;
+    debris = [];
+    for (const line of SHAPE) {
+      for (let i = 0; i < line.length - 1; i++) {
+        const [a1, b1] = toWorld(...line[i]), [a2, b2] = toWorld(...line[i + 1]);
+        const mx = (a1 + a2) / 2, my = (b1 + b2) / 2;
+        debris.push({
+          x: mx, y: my, dx: a1 - mx, dy: b1 - my, r: 0,
+          vx: L.vx * 0.3 + (Math.random() - 0.5) * 70,
+          vy: -20 - Math.random() * 60,
+          vr: (Math.random() - 0.5) * 14,
+        });
+      }
+    }
+    sparks = [];
+    for (let i = 0; i < 70; i++) {
+      const a = Math.random() * Math.PI * 2, v = 20 + Math.random() * 90;
+      sparks.push({ x: L.x, y: L.y, vx: Math.cos(a) * v, vy: Math.sin(a) * v - 30, life: 0.6 + Math.random() * 1.6 });
+    }
+    L.thr = 0;
+    state = 'crashed'; stateT = 0;
+    boom();
+  }
+
+  // ---------- Camera ----------
+  function updateCamera(dt) {
+    const s0 = baseScale();
+    if (state === 'play' || state === 'landed' || state === 'crashed') {
+      const alt = altitude();
+      if (state === 'play') {
+        if (!zoomed && alt < 110) zoomed = true;
+        else if (zoomed && alt > 150) zoomed = false;
+      }
+    } else zoomed = false;
+    const zt = zoomed ? 2.4 : 1;
+    cam.z += (zt - cam.z) * Math.min(1, dt * 3);
+    const S = s0 * cam.z;
+    const halfW = W / 2 / S;
+
+    if (state === 'attract' || state === 'over') {
+      cam.x += dt * 20;
+    } else {
+      const dz = halfW * 0.35;
+      if (L.x - cam.x > dz) cam.x = L.x - dz;
+      if (cam.x - L.x > dz) cam.x = L.x + dz;
+    }
+    const f = (cam.z - 1) / 1.4;
+    const yWide = 800 - (H / 2 - 12) / S;
+    const yZoom = L.y + 30;
+    cam.y = yWide * (1 - f) + yZoom * f;
+    return S;
+  }
+
+  // ---------- Drawing ----------
+  function glow(on) {
+    ctx.shadowBlur = on ? 7 * DPR : 0;
+    ctx.shadowColor = GLOW;
+  }
+  function polyline(pts) {
+    ctx.beginPath();
+    ctx.moveTo(pts[0][0], pts[0][1]);
+    for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]);
+    ctx.stroke();
+  }
+
+  function drawWorld(S) {
+    ctx.setTransform(DPR * S, 0, 0, DPR * S, DPR * (W / 2 - cam.x * S), DPR * (H / 2 - cam.y * S));
+    ctx.strokeStyle = INK; ctx.fillStyle = INK;
+    ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+    glow(true);
+
+    // terrain
+    const halfW = W / 2 / S;
+    const i0 = Math.floor((cam.x - halfW) / STEP) - 1, i1 = Math.ceil((cam.x + halfW) / STEP) + 1;
+    ctx.lineWidth = 1.5 / S;
+    ctx.beginPath();
+    ctx.moveTo(i0 * STEP, gy(i0));
+    for (let i = i0 + 1; i <= i1; i++) ctx.lineTo(i * STEP, gy(i));
+    ctx.stroke();
+
+    // pads
+    const labels = [];
+    ctx.lineWidth = 3 / S;
+    for (const p of pads) {
+      const k0 = Math.floor((cam.x - halfW - p.x2) / WORLD), k1 = Math.ceil((cam.x + halfW - p.x1) / WORLD);
+      for (let k = k0; k <= k1; k++) {
+        const x1 = p.x1 + k * WORLD, x2 = p.x2 + k * WORLD;
+        ctx.beginPath(); ctx.moveTo(x1, p.y); ctx.lineTo(x2, p.y); ctx.stroke();
+        labels.push([(x1 + x2) / 2, p.y, p.m]);
+      }
+    }
+
+    // lander
+    if (state === 'play' || state === 'landed' || state === 'attract') {
+      let lx = L.x, ly = L.y, la = L.a, thr = L.thr;
+      if (state === 'attract') {
+        lx = cam.x; ly = visibleTop() + (H * 0.52) / baseScale() + Math.sin(performance.now() / 700) * 6;
+        la = Math.sin(performance.now() / 1300) * 0.12; thr = 0.55 + Math.sin(performance.now() / 90) * 0.1;
+      }
+      ctx.save();
+      ctx.translate(lx, ly); ctx.rotate(la);
+      ctx.lineWidth = 1.3 / S;
+      for (const line of SHAPE) polyline(line);
+      if (thr > 0.02) {
+        const len = 6 + thr * (12 + Math.random() * 8);
+        const w = 2.2 + thr * 1.2;
+        polyline([[-w, 6.5], [(Math.random() - 0.5) * 1.5, 6.5 + len], [w, 6.5]]);
+      }
+      ctx.restore();
+    }
+
+    // debris & sparks
+    if (debris.length) {
+      const fade = state === 'crashed' ? Math.max(0, 1 - stateT / 3.5) : 0;
+      if (fade > 0) {
+        ctx.globalAlpha = Math.min(1, fade * 1.6);
+        ctx.lineWidth = 1.3 / S;
+        for (const d of debris) {
+          const c = Math.cos(d.r), s = Math.sin(d.r);
+          const ex = d.dx * c - d.dy * s, ey = d.dx * s + d.dy * c;
+          ctx.beginPath(); ctx.moveTo(d.x - ex, d.y - ey); ctx.lineTo(d.x + ex, d.y + ey); ctx.stroke();
+        }
+        ctx.globalAlpha = 1;
+      }
+    }
+    for (const p of sparks) {
+      ctx.globalAlpha = Math.min(1, p.life);
+      ctx.fillRect(p.x - 0.8, p.y - 0.8, 1.6, 1.6);
+    }
+    ctx.globalAlpha = 1;
+
+    // pad labels in screen space
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    const fs = Math.round(Math.min(18, 11 * Math.sqrt(cam.z) * Math.max(0.9, baseScale())));
+    ctx.font = `${fs}px ${FONT}`;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+    for (const [x, y, m] of labels) {
+      const sx = (x - cam.x) * S + W / 2, sy = (y - cam.y) * S + H / 2 + 6;
+      if (sx > -40 && sx < W + 40) ctx.fillText(`${m}X`, sx, sy);
+    }
+  }
+
+  function text(str, x, y, size, align = 'left', spacing = 0) {
+    ctx.font = `${size}px ${FONT}`;
+    ctx.textAlign = align;
+    if ('letterSpacing' in ctx) ctx.letterSpacing = `${spacing}px`;
+    ctx.fillText(str, x, y);
+    if ('letterSpacing' in ctx) ctx.letterSpacing = '0px';
+  }
+  const pad4 = n => String(Math.max(0, Math.floor(n))).padStart(4, '0');
+
+  function drawHud() {
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    ctx.fillStyle = INK; glow(true);
+    ctx.textBaseline = 'alphabetic';
+    const fs = Math.round(Math.max(12, Math.min(18, W / 58)));
+    const lh = fs * 1.45;
+    const top = safeTop + 14 + fs;
+    const narrow = W < 640;
+
+    if (state !== 'attract') {
+      const mm = Math.floor(time / 60), ss = String(Math.floor(time % 60)).padStart(2, '0');
+      text(`SCORE   ${pad4(score)}`, 16, top, fs, 'left', 1);
+      text(`TIME    ${mm}:${ss}`, 16, top + lh, fs, 'left', 1);
+      text(`FUEL    ${pad4(fuel)}`, 16, top + lh * 2, fs, 'left', 1);
+
+      const alt = Math.round(altitude());
+      const hx = Math.round(Math.abs(L.vx)), hy = Math.round(Math.abs(L.vy));
+      const ha = L.vx > 0.5 ? '→' : L.vx < -0.5 ? '←' : ' ';
+      const va = L.vy > 0.5 ? '↓' : L.vy < -0.5 ? '↑' : ' ';
+      const R = W - 16;
+      text(`${narrow ? 'ALT' : 'ALTITUDE'}  ${String(alt).padStart(4, ' ')}  `, R, top, fs, 'right', 1);
+      text(`${narrow ? 'H SPEED' : 'HORIZONTAL SPEED'}  ${String(hx).padStart(4, ' ')} ${ha}`, R, top + lh, fs, 'right', 1);
+      text(`${narrow ? 'V SPEED' : 'VERTICAL SPEED'}  ${String(hy).padStart(4, ' ')} ${va}`, R, top + lh * 2, fs, 'right', 1);
+
+      if (state === 'play' && fuel < LOW_FUEL && Math.floor(performance.now() / 400) % 2 === 0) {
+        text(fuel <= 0 ? 'OUT OF FUEL' : 'LOW ON FUEL', W / 2, top + lh * 3.4, fs, 'center', 3);
+      }
+    }
+
+    const mid = H * 0.36;
+    const big = Math.round(Math.max(18, Math.min(34, W / 30)));
+    if (state === 'landed' || state === 'crashed') {
+      text(msg, W / 2, mid, big, 'center', 3);
+      text(sub, W / 2, mid + big * 1.5, Math.round(big * 0.6), 'center', 2);
+      if (fuel <= 0 && stateT > 1.2) text('FUEL EXHAUSTED', W / 2, mid + big * 2.6, Math.round(big * 0.6), 'center', 2);
+    }
+    if (state === 'over') {
+      text('GAME OVER', W / 2, mid, Math.round(big * 1.4), 'center', 6);
+      text(`FINAL SCORE ${pad4(score)}     HIGH SCORE ${pad4(hi)}`, W / 2, mid + big * 1.6, Math.round(big * 0.6), 'center', 2);
+      if (stateT > 1.2 && Math.floor(performance.now() / 500) % 2 === 0)
+        text(coarse ? 'TAP TO PLAY AGAIN' : 'PRESS SPACE TO PLAY AGAIN', W / 2, mid + big * 2.8, Math.round(big * 0.6), 'center', 2);
+    }
+    if (state === 'attract') {
+      const t = Math.round(Math.max(34, Math.min(96, W / 11)));
+      text('LUNAR LANDER', W / 2, H * 0.22 + safeTop, t, 'center', Math.round(t * 0.12));
+      const s = Math.round(Math.max(13, Math.min(20, W / 45)));
+      if (Math.floor(performance.now() / 600) % 2 === 0)
+        text(coarse ? 'TAP TO START' : 'PRESS SPACE TO START', W / 2, H * 0.22 + safeTop + t * 0.9, s + 2, 'center', 3);
+      const help = coarse
+        ? ['◀ ▶  ROTATE', 'THRUST  FIRE DESCENT ENGINE', 'ABORT  LEVEL OUT AND FULL THRUST']
+        : ['← →  ROTATE        ↑  THRUST', 'X  ABORT        P  PAUSE        M  SOUND'];
+      help.forEach((h, i) => text(h, W / 2, H * 0.22 + safeTop + t * 0.9 + s * (2.4 + i * 1.5), s, 'center', 1));
+      text(`LAND ON A PAD. SMALLER PADS SCORE MORE.   HIGH SCORE ${pad4(hi)}`, W / 2, H - (coarse ? 130 : 28), Math.max(11, s - 3), 'center', 1);
+    }
+    if (paused) {
+      text('PAUSED', W / 2, H * 0.36, big, 'center', 6);
+      text(coarse ? 'TAP TO RESUME' : 'PRESS P TO RESUME', W / 2, H * 0.36 + big * 1.5, Math.round(big * 0.55), 'center', 2);
+    }
+    if (muted) text('SOUND OFF', 16, H - 16, 12, 'left', 1);
+  }
+
+  // ---------- Loop ----------
+  let last = performance.now(), acc = 0;
+  const FIXED = 1 / 120;
+  function frame(now) {
+    let dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+    if (paused) dt = 0;
+
+    acc += dt;
+    while (acc >= FIXED) { step(FIXED); acc -= FIXED; }
+    stateT += dt;
+    if ((state === 'landed' && stateT > 3.2) || (state === 'crashed' && stateT > 3.8)) endRound();
+
+    if (state === 'play' && fuel > 0 && fuel < LOW_FUEL && !paused) {
+      lowBeepT -= dt;
+      if (lowBeepT <= 0) { beep(880, 0.08, 0, 'square', 0.06); lowBeepT = 0.9; }
+    }
+    thrustSound(L.thr);
+
+    const S = updateCamera(dt || 1 / 60);
+
+    // phosphor persistence
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    glow(false);
+    ctx.fillStyle = 'rgba(0,0,0,0.5)';
+    ctx.fillRect(0, 0, cv.width, cv.height);
+
+    drawWorld(S);
+    drawHud();
+    requestAnimationFrame(frame);
+  }
+
+  genTerrain();
+  cam.x = WORLD / 2;
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
