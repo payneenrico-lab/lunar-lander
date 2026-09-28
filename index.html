@@ -430,8 +430,18 @@
         else if (zoomed && alt > 150) zoomed = false;
       }
     } else zoomed = false;
-    const zt = zoomed ? 2.4 : 1;
+    let zt = zoomed ? 2.4 : 1;
+    // Zoom out when the ship climbs above the top of the screen, keeping the ground anchored
+    // at the bottom and the ship clear of the HUD.
+    let zFit = Infinity;
+    if (!zoomed && (state === 'play' || state === 'landed' || state === 'crashed')) {
+      const hudPx = safeTop + 100;
+      const needWorld = 800 - L.y + 30;
+      zFit = Math.max(0.2, (H - 12 - hudPx) / needWorld / s0);
+      zt = Math.min(zt, zFit);
+    }
     cam.z += (zt - cam.z) * Math.min(1, dt * 3);
+    cam.z = Math.min(cam.z, zFit);
     const S = s0 * cam.z;
     const halfW = W / 2 / S;
 
@@ -442,7 +452,7 @@
       if (L.x - cam.x > dz) cam.x = L.x - dz;
       if (cam.x - L.x > dz) cam.x = L.x + dz;
     }
-    const f = (cam.z - 1) / 1.4;
+    const f = Math.max(0, Math.min(1, (cam.z - 1) / 1.4));
     const yWide = 800 - (H / 2 - 12) / S;
     const yZoom = L.y + 30;
     cam.y = yWide * (1 - f) + yZoom * f;
@@ -529,7 +539,7 @@
 
     // pad labels in screen space
     ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
-    const fs = Math.round(Math.min(18, 11 * Math.sqrt(cam.z) * Math.max(0.9, baseScale())));
+    const fs = Math.round(Math.max(9, Math.min(18, 11 * Math.sqrt(cam.z) * Math.max(0.9, baseScale()))));
     ctx.font = `${fs}px ${FONT}`;
     ctx.textAlign = 'center'; ctx.textBaseline = 'top';
     for (const [x, y, m] of labels) {
