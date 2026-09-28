@@ -73,6 +73,7 @@
   // ---------- World constants ----------
   const WORLD = 3000, SEG = 160, STEP = WORLD / SEG;
   const G = 9, THRUST = 24, FUEL_RATE = 28, ROT = Math.PI * 0.8;
+  const MAX_TILT = Math.PI * 2 / 3;   // 120 degrees either side of upright
   const START_FUEL = 1000, LOW_FUEL = 150;
   const PAD_SEGS = { 2: 5, 3: 4, 4: 3, 5: 2 };
 
@@ -337,7 +338,7 @@
         if (held('right')) L.a += ROT * dt;
         if (held('thrust')) target = 1;
       }
-      L.a = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, L.a));
+      L.a = Math.max(-MAX_TILT, Math.min(MAX_TILT, L.a));
       if (fuel <= 0) target = 0;
       const rate = target > L.thr ? 4 : 7;
       L.thr += Math.max(-rate * dt, Math.min(rate * dt, target - L.thr));
